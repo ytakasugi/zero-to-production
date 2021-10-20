@@ -940,3 +940,140 @@ async fn health_check_works() {
 ```
 
 `cargo test`はグリーンになりました。私たちのセットアップはより強固になりました。
+
+# Chapter3.5
+
+## 2.Working With HTML forms
+
+### 2.1.Refining Our Requirements
+
+メールマガジンの購読者として登録するためには、訪問者からどのような情報を収集すればよいのでしょうか？
+
+そうですね、確かにメールアドレスは必要です（結局、メールマガジンですからね）。
+他には？
+
+通常のビジネス環境であれば、チーム内のエンジニアとプロダクトマネージャーの間で、このような会話が交わされます。この場合、私たちはテクニカルリードであると同時にプロダクトオーナーでもあるので、私たちが主導権を握ることができるのです。
+
+個人的な経験から言うと、一般的に人々はニュースレターを購読する際に、スローアウェイメールやマスクメールを使用します（少なくとも、『Zero To Production』を購読する際には、ほとんどの方がそうしていました）。
+そのため、メールでの挨拶（悪名高い`Hey {subscriber.name}}!`）に使える名前を集めたり、購読者のリストの中から共通の知り合いを見つけたりすることができたらいいと思います。
+私たちは警官ではありませんし、名前の欄が本物であることに興味はありません。私たちのニュースレターシステムで自分の識別子として使いたいと思うものを入力してもらいます。[`DenverCoder9`](https://xkcd.com/979/), we welcome you.
+
+つまり、新規登録者にはメールアドレスと名前を入力してもらうことになります。
+
+データはHTMLフォームで収集されるので、POSTリクエストのボディでバックエンドAPIに渡されます。ボディはどのようにエンコードされるのでしょうか？
+HTMLフォームを使用する際には、いくつかの[オプション](https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/POST)がありますが、今回のユースケースでは、`application/x-www-form-urlencoded`が最も適しています。
+
+>キーと値は、キーと値の間に「=」を挟み、「&」で区切られたキー・バリュータプルでエンコードされます。キーと値の両方に含まれる英数字以外の文字はパーセントエンコードされます。
+
+例：名前が`Le Guin`でメールが `ursula_le_guin@gmail.com`の場合、POSTリクエストボディは `name=le%20guin&email=ursula_le_guin%40gmail.com`となります（スペースは`%20`に、`@`は`%40`に置き換えられます-参考変換表は[こちら](https://www.w3schools.com/tags/ref_urlencode.ASP)）。
+
+要約すると
+
+- nameとemailの有効なペアが`application/x-www-form-urlencoded`フォーマットで提供された場合、バックエンドは`200 OK`を返します。
+- nameとemailのどちらかが欠けている場合、バックエンドは`400 BAD REQUEST`を返します。
+
+### 2.2.Capturing Our Requirements As Tests
+
+さて、何が起こるべきかをよく理解したところで、期待することをいくつかの統合テストで表現してみましょう。
+
+新しいテストを既存の `tests/health_check.rs` ファイルに追加しましょう。テストスイートのフォルダ構造は後で整理します。
+
+```rust
+//! tests/health_check.rs
+use zero2prod::run;
+use std::net::TcpListener;
+
+/// Spin up an instance of our application 
+/// and returns its address (i.e. http://localhost:XXXX)
+fn spawn_app() -> String {
+    [...]
+}
+
+#[actix_rt::test]
+async fn health_check_works() {
+    [...]
+}
+
+#[actix_rt::test]
+async fn subscribe_returns_a_200_for_valid_form_data() {
+    // Arrange
+    let app_address = spawn_app();
+    let client = reqwest::Client::new();
+    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+
+    // Act
+    let response = client
+        .post(&format!("{}/subscriptions", &app_address))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("Failed to execute request.");
+
+    // Assert
+    assert_eq!(200, response.status().as_u16());
+}
+
+
+#[actix_rt::test]
+async fn subscribe_returns_a_400_when_data_is_missing() {
+    // Arrange
+    let app_address = spawn_app();
+    let client = reqwest::Client::new();
+    let test_cases = vec![
+        ("name=le%20guin", "missing the email"),
+        ("email=ursula_le_guin%40gmail.com", "missing the name"),
+        ("", "missing both name and email")
+    ];
+
+    for (invalid_body, error_message) in test_cases {
+        // Act
+        let response = client
+            .post(&format!("{}/subscriptions", &app_address))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(invalid_body)
+            .send()
+            .await
+            .expect("Failed to execute request.");
+
+        // Assert
+        assert_eq!(
+            400,
+            response.status().as_u16(),
+            // Additional customised error message on test failure
+            "The API did not fail with 400 Bad Request when the payload was {}.",
+            error_message
+        );
+    }
+}
+```
+
+`subscribe_returns_a_400_when_data_is_missing`はテーブル駆動型テストの一例で、パラメトリックテストとしても知られています。
+テストロジックを何度も繰り返すのではなく、同じように失敗することが予想される既知の無効なボディの集合に対して同じアサーションを実行すればよいのです。
+パラメトリックテストでは、失敗したときに適切なエラーメッセージを表示することが重要です。逆に言えば、パラメータ化されたテストは多くの領域をカバーしているので、素敵な失敗メッセージを生成するためにもう少し時間をかけるのは理にかなっているということです。
+他の言語のテストフレームワークでは、このようなテストスタイルをネイティブでサポートしていることがあります(例えば、[`pytest`のパラメトリックテスト](https://docs.pytest.org/en/stable/parametrize.html)や[`C#`のxUnitの`InlineData`](https://andrewlock.net/creating-parameterised-tests-in-xunit-with-inlinedata-classdata-and-memberdata/))- Rustのエコシステムには、似たような機能で基本的なテストフレームワークを拡張するいくつかのクレートがありますが、残念ながら非同期テストを書くのに必要な`#[actix_rt::test]`マクロとの相互運用性は高くありません([`rstest`](https://github.com/la10736/rstest/issues/85)や[`test-case`](https://github.com/frondeus/test-case/issues/36)を参照)。
+
+それでは、テスト・スイートを実行してみましょう。
+
+```
+---- health_check::subscribe_returns_a_200_for_valid_form_data stdout ----
+thread 'health_check::subscribe_returns_a_200_for_valid_form_data' 
+panicked at 'assertion failed: `(left == right)`
+  left: `200`,
+ right: `404`: 
+
+---- health_check::subscribe_returns_a_400_when_data_is_missing stdout ----
+thread 'health_check::subscribe_returns_a_400_when_data_is_missing' 
+panicked at 'assertion failed: `(left == right)`
+  left: `400`,
+ right: `404`: 
+ The API did not fail with 400 Bad Request when the payload was missing the email.'
+ ```
+ 
+ 予想通り、新しいテストはすべて失敗しています。
+「ロール・ユア・オーナー方式」のパラメトリックテストの限界がすぐにわかります。 一つのテストケースが失敗するとすぐに実行が停止してしまい、 次のテストケースの結果がわからないのです。
+
+それでは早速、実装を始めてみましょう。
+
+### 2.3.Parsing Form Data From A POST Request
+
