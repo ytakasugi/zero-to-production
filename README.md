@@ -1077,3 +1077,173 @@ panicked at 'assertion failed: `(left == right)`
 
 ### 2.3.Parsing Form Data From A POST Request
 
+アプリケーションが、`/subscriptions`へのPOSTリクエストに対して`404 NOT FOUND`を返すため、すべてのテストが失敗します。
+
+正当な動作：そのパスに対応するハンドラが登録されていません。
+
+この問題を解決するために、`src/lib.rs`の`App`にマッチするルートを追加しましょう。
+
+```rust
+//! src/lib.rs
+use actix_web::dev::Server;
+use actix_web::{web, App, HttpResponse, HttpServer};
+use std::net::TcpListener;
+
+// We were returning `impl Responder` at the very beginning.
+// We are now spelling out the type explicitly given that we have become more familiar with `actix-web`.
+// There is no performance difference! Just a stylistic choice :)
+async fn health_check() -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+
+// Let's start simple: we always return a 200 OK
+async fn subscribe() -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+
+pub fn run(listener: TcpListener) -> Result<Server, std::io::Error> {
+    let server = HttpServer::new(|| {
+        App::new()
+            .route("/health_check", web::get().to(health_check))
+            // A new entry in our routing table for POST /subscriptions requests
+            .route("/subscriptions", web::post().to(subscribe))
+    })
+    .listen(listener)?
+    .run();
+    Ok(server)
+}
+```
+
+テスト・スイートの再実行
+
+```
+running 3 tests
+test health_check::health_check_works ... ok
+test health_check::subscribe_returns_a_200_for_valid_form_data ... ok
+test health_check::subscribe_returns_a_400_when_data_is_missing ... FAILED
+
+failures:
+
+---- health_check::subscribe_returns_a_400_when_data_is_missing stdout ----
+thread 'health_check::subscribe_returns_a_400_when_data_is_missing' 
+panicked at 'assertion failed: `(left == right)`
+  left: `400`,
+ right: `200`: 
+ The API did not fail with 400 Bad Request when the payload was missing the email.'
+
+failures:
+    health_check::subscribe_returns_a_400_when_data_is_missing
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`subscribe_returns_a_200_for_valid_form_data`は、現在パスしています：私たちのハンドラはすべての入力データを有効なものとして受け入れます。
+一方、`subscribe_returns_a_400_when_data_is_missing` はまだ赤です。
+リクエストボディを実際に解析してみましょう。`actix-web`は私たちに何を提供してくれるのでしょうか？
+
+#### 2.3.1.Extractors
+
+`actix-web`のユーザーガイドの中で、かなり目立つのが「抽出器」のセクションです。
+抽出器は、その名の通り、入力されたリクエストから特定の情報を抽出するようにフレームワークに指示するために使用されます。
+`actix-web`には、最も一般的な使用例に対応するために、いくつかの抽出器が用意されています。
+
+- [Path](https://docs.rs/actix-web/4.0.0-beta.1/actix_web/web/struct.Path.html)は、リクエストのパスから動的なパスセグメントを取得します。
+- [Query](https://docs.rs/actix-web/4.0.0-beta.1/actix_web/web/struct.Query.html)は、クエリパラメータを取得します。
+- [Json](https://docs.rs/actix-web/4.0.0-beta.1/actix_web/web/struct.Json.html)は、JSON エンコードされたリクエストボディを解析します。
+
+などです。
+幸いなことに、私たちのニーズにぴったりの抽出器があります。[Form](https://docs.rs/actix-web/4.0.0-beta.1/actix_web/web/struct.Form.html)です。
+ドキュメントを読んでみましょう。
+
+>フォームデータヘルパー（`application/x-www-form-urlencoded`）。
+リクエストボディからURLエンコードされたデータを抽出したり、URLエンコードされたデータをレスポンスとして送信したりするのに使用できます。
+
+それは、私の耳には音楽のように聞こえます。
+どうやって使うの？
+
+`actix-web`のユーザーガイドを見ています。
+
+>抽出器は、ハンドラ関数の引数としてアクセスできます。Actix-webでは、ハンドラ関数ごとに最大10個の抽出器をサポートしています。引数の位置は関係ありません。
+
+Example:
+
+```rust
+use actix_web::web;
+
+#[derive(serde::Deserialize)]
+struct FormData {
+    username: String,
+}
+
+/// Extract form data using serde.
+/// This handler get called only if content type is *x-www-form-urlencoded*
+/// and content of the request could be deserialized to a `FormData` struct
+fn index(form: web::Form<FormData>) -> String {
+    format!("Welcome {}!", form.username)
+}
+```
+
+つまり、基本的には...ハンドラーの引数としてそれを置くだけで、リクエストが来たときに actix-web があなたのために重労働をしてくれるのです。今のところは一緒にやってみましょう。フードの下で何が起こっているかを理解するために、後でまた戻ってきます。
+
+私たちの `subscribe`ハンドラは現在次のようになっています。
+
+```rust
+//! src/lib.rs
+// Let's start simple: we always return a 200 OK
+async fn subscribe() -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+```
+
+この例を参考にすると、おそらく次のようなものになるでしょう。
+
+```rust
+//! src/lib.rs
+// [...]
+
+#[derive(serde::Deserialize)]
+struct FormData {
+    email: String,
+    name: String
+}
+
+async fn subscribe(_form: web::Form<FormData>) -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+```
+
+`cargo check`がうまくいかない
+
+```
+error[E0433]: failed to resolve: use of undeclared type or module `serde`
+ --> src/lib.rs:9:10
+  |
+9 | #[derive(serde::Deserialize)]
+  |          ^^^^^ use of undeclared type or module `serde`
+```
+
+それはいいとして、依存関係に`serde`を追加する必要があります。それでは、`Cargo.toml`に新しい行を追加してみましょう。
+
+```toml
+[dependencies]
+# We need the optional `derive` feature to use `serde`'s procedural macros: 
+# `#[derive(Serialize)]` and `#[derive(Deserialize)]`.
+# The feature is not enabled by default to avoid pulling in 
+# unnecessary dependencies for projects that do not need it.
+serde = { version = "1", features = ["derive"]}
+```
+
+`cargo check`が成功するはずです。`cargo test`はどうですか？
+
+```
+running 3 tests
+test health_check_works ... ok
+test subscribe_returns_a_200_for_valid_form_data ... ok
+test subscribe_returns_a_400_when_data_is_missing ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+すべて成功しました。
+
+でも、なぜ？
