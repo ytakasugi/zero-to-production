@@ -1247,3 +1247,91 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 すべて成功しました。
 
 でも、なぜ？
+
+#### 2.3.2.`Form` and `FromRequest`
+
+それでは早速、`Form`はどのようなものなのでしょうか？
+`Form`のソースコードは[ここ](https://github.com/actix/actix-web/blob/master/src/types/form.rs)にあります。
+
+その定義はかなり無邪気なものです。
+
+```rust
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub struct Form<T>(pub T);
+```
+
+これは単なるラッパーで、`Form`の唯一のフィールドを生成するために使用される`T`型のジェネリックです。
+ここではあまり見るべきものはありません。
+抽出のマジックはどこで行われるのでしょうか？
+
+抽出器は、`FromRequest`のトレイトを実装した型です。
+Rustは トレイトの定義で`async fn`をまだサポートしていないので、`FromRequest`の定義は少し不自然です。これを少し変えてみると、だいたい以下のようになります。
+
+```rust
+/// Trait implemented by types that can be extracted from request.
+///
+/// Types that implement this trait can be used with `Route` handlers.
+pub trait FromRequest: Sized {
+    type Error = Into<actix_web::Error>;
+
+    async fn from_request(req: &HttpRequest, payload: &mut Payload) -> Result<Self, Self::Error>;
+    
+    /// Omitting some ancillary methods that actix-web implements 
+    /// out of the box for you and supporting associated types
+    ///  [...]
+}
+```
+
+`from_request`は、入力として、受信したHTTPリクエストのヘッド(すなわち`HttpRequest`)と、そのペイロードのバイト(すなわち`Payload`)を受け取ります。抽出が成功した場合はSelfを、`actix_web::Error`に変換可能なエラータイプを返します。
+`actix-web`は各引数に対して`from_request`を起動し、すべての引数の抽出に成功した場合は、実際のハンドラ関数を実行します。
+`actix-web`は各引数に対して`from_request`を起動し、すべての引数の抽出に成功した場合は、実際のハンドラ関数を実行します。抽出に失敗した場合は、対応するエラーが呼び出し元に返され、ハンドラは決して起動されません（`actix_web::Error`は`HttpResponse`に変換できます）。
+
+これは非常に便利なことです。ハンドラーは受信した生のリクエストを処理する必要がなく、代わりに強力に型付けされた情報を直接扱うことができるので、リクエストを処理するために書かなければならないコードを大幅に簡素化することができます。
+
+それでは、`Form`の`FromRequest`の実装を見てみましょう：これは何をしているのでしょうか？
+繰り返しになりますが、重要な要素を強調するために実際のコードを少し変更し、細かい実装の詳細は無視しています。
+
+```rust
+impl<T> FromRequest for Form<T>
+where
+    T: DeserializeOwned + 'static,
+{
+    type Error = actix_web::Error;
+
+    async fn from_request(req: &HttpRequest, payload: &mut Payload) -> Result<Self, Self::Error> {
+        // Omitted stuff around extractor configuration (e.g. payload size limits)
+
+        match UrlEncoded::new(req, payload).await {
+            Ok(item) => Ok(Form(item)),
+            // The error handler can be customised.
+            // The default one will return a 400, which is what we want.
+            Err(e) => Err(error_handler(e))
+        }       
+    }
+}
+```
+
+すべての作業は、`UrlEncoded`構造体の中で行われているようです。
+`UrlEncoded`は多くのことを行います。圧縮および非圧縮のペイロードを透過的に処理したり、リクエスト ボディが一度にチャンクごとにバイトのストリームとして到着することを処理したりします。
+これらすべての処理が終わった後の重要な一節は、次のとおりです。
+
+```rust
+serde_urlencoded::from_bytes::<T>(&body).map_err(|_| UrlencodedError::Parse)
+```
+
+`serde_urlencoded`は，`application/x-www-form-urlencoded`データフォーマットの（脱）シリアライズをサポートします．
+`from_bytes`は入力として連続したバイトのスライスを受け取り、そこから型`T`のインスタンスを URLエンコード形式のルールに従ってデシリアライズします: キーと値は、キーと値の間に`=`を挟んで`&`で区切られたキー・値タプルにエンコードされます; キーと値の両方の非英数字はパーセントエンコードされます。
+
+ジェネリックな型`T`に対して、どうしてその方法がわかるのでしょうか？
+それは`T`が`serde`の`DeserializedOwned`トレイトを実装しているからです。
+
+```rust
+impl<T> FromRequest for Form<T>
+where
+    T: DeserializeOwned + 'static,
+{
+// [...]
+}
+```
+
+実際に何が行われているのかを理解するためには、`serde`自体をよく見てみる必要があります。
