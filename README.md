@@ -1335,3 +1335,52 @@ where
 ```
 
 実際に何が行われているのかを理解するためには、`serde`自体をよく見てみる必要があります。
+
+#### 2.3.3.Rustのシリアル化：`serde`
+
+>このserdeのセクションでは、Rustの高度なトピックにいくつか触れています。
+初めて読んだときに、すべてがうまくいかなくても大丈夫です。
+Rustと`serde`をもう少し使い込んだら、このセクションに戻ってきて、難しい部分を深く掘り下げてみてください。
+
+なぜ`serde`が必要なのか？実際`serde`は私たちのために何をしてくれるのでしょうか？
+その[ガイド](https://serde.rs/)から引用します。
+
+>`Serde`は、Rustデータ構造を効率的かつ汎用的にシリアライズ/デシリアライズするためのフレームワークです。
+
+#### 2.3.3.1.Generically
+
+JSON、Avro、MessagePack の仕様を扱うコードは、serde の内部には存在しません。特定のデータ形式をサポートする必要がある場合は、別の木箱 (例: JSON用の `serde_json`やAvro用の`avro-rs`など) を使用する必要があります。
+`serde`は一連のインターフェイスを定義しており、彼ら自身が「データモデル」と呼んでいます。
+
+新しいデータ形式のシリアライズをサポートするライブラリを実装したい場合、[`Serializer`トレイト](https://docs.serde.rs/serde/trait.Serializer.html)の実装を提供する必要があります。
+`Serializer`トレイトの各メソッドは、`serde`のデータモデルを形成する 29 の型のうちの 1 つに対応します。Serializer の実装では、これらの型のそれぞれが特定のデータ形式にどのように対応するのかを指定します。
+たとえば、JSON のシリアライズをサポートする場合、[`serialize_seq`](https://docs.serde.rs/serde/trait.Serializer.html#tymethod.serialize_seq)の実装は、開始角括弧`[`を出力し、シーケンス要素をシリアライズするために使用できる型を返すでしょう。
+
+一方、`Serialize`トレイトがあります。Rust 型に対する Serialize::serialize の実装は、`Serializer`トレイトで利用可能なメソッドを使用して、`serde`のデータモデルに従ってそれを分解する方法を指定することを意図しています。
+再び配列の例で説明すると、Rust ベクトルに対する `Serialize`の実装はこのようになります。
+
+```rust
+use serde::ser::{Serialize, Serializer, SerializeSeq};
+
+impl<T> Serialize for Vec<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for element in self {
+            seq.serialize_element(element)?;
+        }
+        seq.end()
+    }
+}
+```
+
+これによって、`serde`はデータ形式を問わないことになります。つまり、`crate.io`に`Serializer`の実装があれば、どのようなフォーマットでもシリアライズすることができます（ネタバレ：よく使われるデータフォーマットのほとんど全て）。
+デシリアライズについても同様で、`Deserialize`と`Deserializer`を使用し、ゼロコピーデシリアライズをサポートするためにライフタイムに関するいくつかの詳細が追加されています。
+
+#### 2.3.3.2.Efficiently
+
